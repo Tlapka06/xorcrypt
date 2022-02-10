@@ -1,60 +1,49 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include "xorCrypt.h"
+#define DEBUG 1
 
-#define MAX_KEY_LENGTH 256
-#define BUFFER_SIZE 512
-#define DEBUG 0
+#include "std.h"
+#include <readpassphrase.h>
+#include "xorcrypt.h"
+#include <limits.h>
 
-#define debug_print(fmt, ...) \
-do { if (DEBUG) fprintf(stderr, fmt, __VA_ARGS__); } while (0)
+//!!!!!!!!!!!!!!//
+//	  WARNING	//
+//!!!!!!!!!!!!!!//
+// MAX_INTERACTIVE_KEY_LENGTH is used to allocate on stack
+// it should not be greater than 1024
+#define MAX_INTERACTIVE_KEY_LENGTH 512
+#if MAX_INTERACTIVE_KEY_LENGTH > 1024
+#error MAX_INTERACTIVE_KEY_LENGTH is used to allocate on stack, it should not be greater than 1024
+#endif
 
-void fatalError(const char * text);
+#define DEFAULT_BLOCK_SIZE 4096
+
 void help();
 
 int main(int argc, char *argv[]) {
-	char* key;
-	FILE* inFile = stdin;
-	FILE* outFile = stdout;
-	enum { OPT_SILENT=1 } options = 0;
+	char * key = NULL;
+	char * filenameIn = NULL;
+	char * filenameOut = NULL;
+	FILE * fileIn;
+	FILE * fileOut;
+	char * buffer;
+	enum {
+		OPT_NONE = 0,
+		OPT_FORCE_ENCRYPT = 1
+	} options = OPT_NONE;
 	
-	// Allocate space for key
-	key = malloc(MAX_KEY_LENGTH);
-	if (key == NULL) {
-		fatalError("Key allocation failed");
-	}
-	
-	while (getopt(argc, argv, "hvsk:i:o:") != -1) {
-		debug_print("DEBUG: option: -%c \"%s\" (%i:%i)\n", optopt, optarg, optind, opterr);
+	// Arguments
+	while (optind < argc) {
+		getopt(argc, argv, "k:fo:vh");
+		debug_print("DEBUG: option: -%c \"%s\" (optind = %i opterr = %i argc = %i &argv[optind-1] = %p)\n", optopt, optarg, optind, opterr, argc, argv[optind-1]);
 		switch (optopt) {
 			case 'k':
-				// Key
-				if (strlcpy(key, optarg, MAX_KEY_LENGTH) >= MAX_KEY_LENGTH) {
-					fatalError("Key is longer than MAX_KEY_LENGTH");
-				}
+				key = argv[optind-1];
 				break;
-			case 'i':
-				// Input file
-				if (inFile == stdin) {
-					inFile = fopen(optarg, "rb");
-					if (inFile == NULL) {
-						fatalError("Failed to open input file");
-					}
-				}
+			case 'f':
+				options |= OPT_FORCE_ENCRYPT;
 				break;
 			case 'o':
-				// Output file
-				if (outFile == stdout) {
-					outFile = fopen(optarg, "wb");
-					if (outFile == NULL) {
-						fatalError("Failed to open output file");
-					}
-				}
-				break;
-			case 's':
-				options = OPT_SILENT;
+				filenameOut = argv[optind-1];
 				break;
 			case 'v':
 				fprintf(stderr, "xorCrypt (c) Jakub Janík 2022 <mail.me@anidor.org>");
@@ -63,63 +52,56 @@ int main(int argc, char *argv[]) {
 			case '?':
 				help();
 			default:
-				help();
-		}
-	}
-	
-	debug_print("DEBUG: options: %i\n", options);
-	
-	if (!(options & OPT_SILENT)) {
-		fprintf(stderr, "\t XOR crypt tool\n\t================\n");
-	}
-	
-	// If user haven't specified key with argument, ask for it now
-	while (key[0] == 0) {
-		fprintf(stderr, "Key:");
-		fgets(key, MAX_KEY_LENGTH, stdin);
-		key[strlen(key)-1] = 0;
-	}
-	
-	debug_print("DEBUG: key: \"%s\"\n", key);
-	
-	// XOR crypt
-	int keyOffset = 0;
-	int byte;
-	while (1) {
-		byte = fgetc(inFile);
-		debug_print("DEBUG: byte: %x(%c)\n", byte, byte);
-		if (byte == EOF) {
-			if (feof(inFile)) {
+				// sets file
+				if (filenameIn == NULL) {
+					filenameIn = argv[optind++];
+				} else {
+					help();
+				}
 				break;
+		}
+	}
+	
+	
+	debug_print("DEBUG: &key = %p &filenameIn = %p\n", key, filenameIn);
+	// If user haven't specified key with argument, ask for it now
+	if (key == NULL) {
+		key = alloca(MAX_INTERACTIVE_KEY_LENGTH);
+		do {
+			if (readpassphrase("Key:", key, MAX_INTERACTIVE_KEY_LENGTH, RPP_REQUIRE_TTY) == NULL) {
+				fatalError("ERROR: failed to read password");
 			}
-			fatalError("Failed to read input file");
-		}
-		
-		byte = byte ^ key[keyOffset];
-		debug_print("DEBUG: xored byte: 0x%x(%c) xored by 0x%x(%c)\n", byte, byte, key[keyOffset], key[keyOffset]);
-		if (++keyOffset >= strlen(key)) {
-			keyOffset = 0;
-		}
-		
-		if (fputc(byte, outFile) == EOF) {
-			fatalError("Failed to write output file");
-		}
+		} while (key[0] == 0);
+	}
+	debug_print("DEBUG: key = \"%s\" filenameIn = \"%s\" filenameOut = \"%s\"", key, filenameIn, filenameOut);
+	
+	//////////////////
+	//	 XOR crypt	//
+	//////////////////
+	size_t readSize;
+	enum {
+		M_DECRYPT = 0,
+		M_ENCRYPT = 1
+	} mode;
+	
+	buffer = critmalloc(DEFAULT_BLOCK_SIZE);
+	
+	fileIn = fopen(filenameIn, "rb");
+	if (fileIn == NULL) {
+		fatalError("ERROR: cannot open input file");
 	}
 	
-	fclose(inFile);
-	fclose(outFile);
-	
-	if (!(options & OPT_SILENT)) {
-		fprintf(stderr, "\nCrypting done\n");
+	if ((readSize = fread(buffer, 1, DEFAULT_BLOCK_SIZE, fileIn)) == 0) {
+		fatalError("ERROR: file has no content");
 	}
-}
-
-void fatalError(const char * text) {
-	perror(text);
-	exit(1);
+	
+	mode = memcmp(((struct xorHeader *)buffer)->id, "XOR", 3) != 0 || options & OPT_FORCE_ENCRYPT;
+	
+	// End
+	fprintf(stderr, "\nCrypting done\n");
 }
 
 void help() {
-	fprintf(stderr, "Usage:\n\txorCrypt [-s] [-k <key>] [-i <inputFile>] [-o <outputFile>]\n\txorCrypt -h/?\n\txorCrypt -v\n");
+	fprintf(stderr, "xorCrypt\nUsage:\n\txorCrypt -h/?\tshow this help\n\txorCrypt -v\tprints version\n\txorCrypt [-s] [-f] [-a <algorithm>] [-k <key>] [-o filename] file\n\t\t-f\tforce encryption\n\t\t-a\tlet you choose algorithm (TBD)\n\t\t-k\tlet you enter key\n\t\t-o\tname of output file");
 	exit(0);
 }
